@@ -1,0 +1,17 @@
+name: 'SEW1 by hor'
+accessible: true
+admins: [HOR, BRE, BUC, HOL, KLE, hor, bre, buc, hol, kle, ksp, ves]
+tutors: [HOR, BRE, BUC, HOL, KLE, hor, bre, buc, hol, kle, ksp, ves]
+groups_student_choice: false
+use_classrooms: true
+allow_unregister: true
+allow_preview: false
+registration: false
+registration_password: null
+registration_ac: null
+registration_ac_list: []
+is_lti: true
+lti_keys:
+  key1: 'ganzGeheim123!'
+lti_send_back_grade: true
+lti_auto_bind: true

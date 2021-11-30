@@ -1,0 +1,672 @@
+#!/usr/bin/env python3
+
+"""pylint option disable=C0114,C0115,C0116"""  # no docstrings
+
+import concurrent.futures
+import logging
+import os
+import pprint
+import re
+import shutil
+import stat
+import subprocess
+import sys
+import time
+import xml.dom.minidom
+from pathlib import Path
+from threading import Lock
+
+sys.path = ["."] + sys.path
+from data import QUESTIONS, JUNIT_PATH, CHECKSTYLE_PATH, THREAD_TIMEOUT, RUN_CSPTS, RUN_STUDENT
+
+from inginious import feedback
+from inginious import input
+
+TEMPLATE_DIR = Path('.templates')
+TEST_DIR = Path('inginious')
+REPORT_DIR = Path('reports')
+OUT_DIR = Path('out')
+
+MAXERRORS = 10
+CHECKSTYLECMD = ['java', '-jar', CHECKSTYLE_PATH] if CHECKSTYLE_PATH and os.path.exists(CHECKSTYLE_PATH) else [
+    'checkstyle']
+
+JUNIT_COMPILER_PATTERN = re.compile(r'^(.*\.java):(\d+): ([^:]+):(.*)$')
+# JUNIT_EXPECTED_PATTERN = re.compile(r'^(.*?)expected: <(.*?)> but was: <(.*?)>$')
+
+CHECKSTYLE_FILES = set()
+
+
+def mkdir(path):
+    try:
+        os.mkdir(path)
+    except FileExistsError:
+        pass
+    except PermissionError as e:  # pragma: no cover
+        print('Unable to create directory: ' + str(e), file=sys.stderr)
+        sys.exit(1)
+
+
+def parse_junit_report(file_name):
+    tests = dict()
+    tree = xml.dom.minidom.parse(file_name)
+    testcases = tree.getElementsByTagName("testcase")
+    for testcase in testcases:
+        name = testcase.getAttribute("name")[:-2]
+        tests[name] = {'failed': False, 'message': None}
+        failed = testcase.getElementsByTagName("failure") or testcase.getElementsByTagName("error")
+        if failed:
+            tests[name]['failed'] = True
+            tests[name]['message'] = failed[0].getAttribute("message")
+    return tests
+
+
+class DefItem:
+    def __init__(self, what, name, calls=None, loop=False):
+        self.what = what
+        self.name = name
+        self.calls = calls if calls else list()
+        self.loop = loop
+
+    def __repr__(self):  # pragma: no cover
+        return "DefItem(" + ", ".join((self.what, self.name, str(self.calls), str(self.loop))) + ")"
+
+
+class Feedback:
+    def __init__(self):
+        self.grade = 0
+        self.success = True
+        self.passed_test_num = 0
+        self.failed_test_num = 0
+        self.pts_earned = 0
+        self.pts_total = 0
+        self.messages = []
+        self.lock = Lock()
+
+    def __repr__(self):
+        return pprint.pformat({x: self.__getattribute__(x)
+                               for x in ("grade", "success",
+                                         "passed_test_num", "failed_test_num",
+                                         "pts_earned", "messages")}, indent=8)
+
+    def fail(self, msg):
+        with self.lock:
+            self.success = False
+            if msg:
+                self.messages.append(msg)
+
+    # def succeed(self):
+    #    with self.lock:
+    #        self.success = True
+
+    def test_passed(self, w):
+        with self.lock:
+            self.success = True
+            self.pts_earned += w
+            self.passed_test_num += 1
+
+    def test_failed(self, _w, msg):
+        with self.lock:
+            self.failed_test_num += 1
+        self.fail(msg)
+
+    def csfail(self, pts, msg):
+        with self.lock:
+            self.success = False
+            if msg and self.pts_total > 0:
+                self.messages.append(msg)
+            self.pts_earned -= abs(pts) * self.pts_total / 100
+
+
+feedbackdata = {q['id']: Feedback()
+                for q in QUESTIONS}
+
+PREFIX = "^([` |-]*)"
+# RE_PREFIX = re.compile(PREFIX)
+RE_DEF = re.compile(PREFIX + "(CLASS|CTOR|METHOD|PACKAGE)_DEF")
+RE_IDENT = re.compile(PREFIX + r"IDENT\s+->\s+([\w.]+)")
+RE_CALL = re.compile(PREFIX + "METHOD_CALL")
+RE_LOOP = re.compile(PREFIX + "LITERAL_(DO|FOR|WHILE)")
+
+
+class TestThread:
+    def __init__(self, question):
+        question["feedback"] = feedbackdata[question['id']]
+        self.question = question
+        self.id = question['id']
+
+        self.checks = question['checks']
+        self.tests = question['tests']
+        for check in self.checks:
+            question["feedback"].pts_total += check['weight']
+        for test in self.tests:
+            question["feedback"].pts_total += test["weight"]
+
+        self.template_file = question['template']
+        self.test_file = question['test']
+        self.ignored = True
+        self.test_num = len(question['tests']) + len(question['checks'])
+        self.out_dir = str(OUT_DIR / self.id)
+        self.report_dir = str(REPORT_DIR / question['sub'])
+        self.create = question['create']
+        self.question_input = None
+
+    def run(self):
+        try:
+            try:
+                inp = input.get_input(self.question['id'])
+                try:
+                    self.question_input = inp.decode("utf-8")
+                except AttributeError:  # pragma: no cover
+                    self.question_input = str(inp)
+            except KeyError as e:  # pragma: no cover
+                msg = str(e) + " (input not found?)"
+                logging.error(msg)
+                self.question_input = ""
+                self.fail(msg)
+
+            if len(self.question_input.strip()) == 0:
+                self.remove_template()
+                return
+
+            self.ignored = False
+
+            mkdir(self.report_dir)
+            tfn = TEMPLATE_DIR / self.template_file
+            fn = '{}/{}'.format(TEST_DIR, self.template_file)  # just the relative path as str
+            if self.create:
+                logging.info("create: %s", fn)
+                mkdir(self.out_dir)
+                input.parse_template(tfn, fn)
+                CHECKSTYLE_FILES.add(fn)
+            else:
+                for i in range(1, 5):
+                    if os.path.exists(fn):
+                        break
+                    time.sleep(i)
+                else:  # pragma: no cover
+                    raise FileNotFoundError("?? not found: " + fn)
+            self.question["template_filename"] = fn
+            self.analyze_tests()
+            self.compile_tests()
+            self.run_tests()
+            self.grade_tests()
+        except Exception as e:
+            logging.warning("Exception during tests: ", exc_info=True, stack_info=True)
+            self.fail("Exception during tests: " + str(e))
+
+    def remove_template(self):
+        try:
+            logging.info("remove template: %s", self.template_file)
+            CHECKSTYLE_FILES.remove(str(TEST_DIR / self.template_file))
+            self.question["template_file_removed"] = True
+            shutil.move(TEST_DIR / self.template_file, TEST_DIR / ("__" + self.template_file))
+        except Exception as e:
+            logging.error("remove template: exception %s", str(e))
+
+    @staticmethod
+    def analyze_file(lines):
+
+        res = []
+
+        # combine multiple idents e.g System.println
+        for i, (line, nextline) in enumerate(zip(lines, lines[1:])):
+            m = RE_IDENT.match(line)
+            if m:
+                mn = RE_IDENT.match(nextline)
+                if mn:
+                    lines[i] = ""
+                    lines[i + 1] = "{} IDENT -> {}.{}".format(m.group(1), m.group(2), mn.group(2))
+
+        lastdef = None
+        lastcall = False
+        lastindent = None
+        for _lnr, line in enumerate(lines, 1):
+            m = RE_DEF.match(line)
+            if m:
+                lastdef = m.group(2)
+                lastindent = len(m.group(1))
+                # logging.debug(f"def {lastdef} @ {lnr} with {lastindent}")
+            else:
+                m = RE_IDENT.match(line)
+                if m:
+                    name = m.group(2)
+                    xlen = len(m.group(1))
+                    if lastdef:
+                        if xlen - lastindent in [3, 4]:
+                            res.append(DefItem(what=lastdef, name=name))
+                            # logging.debug(f"  added: {res[-1]} @ {_lnr}")
+                            lastdef = None
+                    elif lastcall:
+                        lastcall = False
+                        logging.debug("  calls %s %d" % (name, _lnr))
+                        res[-1].calls.append(name)
+                        if "." in name:
+                            last = name.split(".")[-1]
+                            res[-1].calls.append(last)
+                            # logging.debug(f"  calls {last}  {_lnr}")
+                else:
+                    m = RE_CALL.match(line)
+                    if m:
+                        lastcall = True
+                        lastindent = len(m.group(1))
+                    else:
+                        m = RE_LOOP.match(line)
+                        if m:
+                            res[-1].loop = True
+
+        return res
+
+    # noinspection PyMethodMayBeStatic
+    def has_class(self, classname: str, items):
+        """class {0} not found"""
+        return any(i.what == "CLASS" and i.name == classname
+                   for i in items
+                   )
+
+    # noinspection PyMethodMayBeStatic
+    def has_method(self, name: str, items):
+        """method {0} not found"""
+        return any(i.what in ["CTOR", "METHOD"] and i.name == name
+                   for i in items
+                   )
+
+    # noinspection PyMethodMayBeStatic
+    def has_call(self, methodname: str, calledmethod: str, items):
+        """method {0} should call {1}"""
+        return any(i.what in ["CTOR", "METHOD"] and i.name == methodname and calledmethod in i.calls
+                   for i in items
+                   )
+
+    # noinspection PyMethodMayBeStatic
+    def has_n_calls(self, methodname: str, calledmethod: str, n: int, items):
+        """method {0} should call {1} at least {2} times."""
+        return len(list(1
+                        for i in items
+                        if i.what in ["CTOR", "METHOD"] and i.name == methodname
+                        for c in i.calls
+                        if c == calledmethod
+                        )) >= int(n)
+
+    # noinspection PyMethodMayBeStatic
+    def has_loop(self, methodname: str, items):
+        """method {0} should have a loop"""
+        return any(i.what in ["CTOR", "METHOD"] and i.name == methodname and i.loop
+                   for i in items
+                   )
+
+    # noinspection PyMethodMayBeStatic
+    def has_text(self, text: str, _items):
+        """file should contain the text {0}"""
+        return text in self.question_input
+
+    # noinspection PyMethodMayBeStatic
+    def has_regex(self, pattern: str, _items):
+        """file should contain the regex pattern {0}"""
+        return re.search(pattern, self.question_input) is not None
+
+    def analyze_tests(self):
+        if self.question["checks"]:
+            logging.info("run analyze: %s", self.template_file)
+            file = TEST_DIR / self.template_file
+            try:
+                cmd = CHECKSTYLECMD + ['-t', str(file)]
+                logging.debug("checkstyle: %s", " ".join(cmd))
+                proc = subprocess.run(cmd, timeout=THREAD_TIMEOUT, stderr=subprocess.PIPE, stdout=subprocess.PIPE,
+                                      check=False)
+                if proc.returncode != 0:  # pragma: no cover
+                    logging.info("checkstyle returncode: %d", proc.returncode)
+
+                stderr = proc.stderr.decode('utf-8').replace('\r\n', '\n')
+                if stderr:  # pragma: no cover
+                    logging.info("checkstyle error: %s", stderr)
+
+                stdout = proc.stdout.decode('utf-8').splitlines()
+                info = self.analyze_file(stdout)
+                logging.debug("analyze_file: %s entries", len(info))
+
+                for check in self.checks:
+                    try:
+                        chk, *args = check["check"]
+                        invert = chk.startswith("no")
+                        if invert:
+                            chk = chk[2:]
+                        fn = self.__getattribute__("has_" + chk)
+                        res = fn(*args, info) ^ invert
+                        logging.debug("res = %s for %s (invert: %s)", res, check["check"], invert)
+                        check['result'] = res
+                        if not res:
+                            self.fail("\n\n" + ("not: " if invert else "") + fn.__doc__.format(*args) + "\n\n")
+                    except Exception as ex:  # pragma: no cover
+                        logging.error("analyze_tests (loop): %s", str(ex), exc_info=True, stack_info=True)
+            except subprocess.TimeoutExpired:  # pragma: no cover
+                logging.error("Timeout: analyze: %s", file)
+                self.fail("analyze_tests: checkstyle timeout")
+            except Exception as ex:  # pragma: no cover
+                logging.error("analyze_tests: %s", str(ex), exc_info=True, stack_info=True)
+                self.fail("analyze_tests: exception " + str(ex))
+
+    def compile_tests(self):
+        logging.debug("compile tests: cd %s", Path(os.getcwd()).absolute())
+        logging.debug("compile tests: %s", self.test_file)
+        cmd = [
+            'javac',
+            '-encoding', 'UTF-8',
+            '-d', self.out_dir,
+            '-cp', '.:{}:{}:{}'.format(self.out_dir, JUNIT_PATH, TEST_DIR),
+            str(TEST_DIR / self.test_file)
+        ]
+        logging.debug("compile: %s", " ".join(cmd))
+        proc = subprocess.run(cmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        stderr = proc.stderr.decode('utf-8').replace('\r\n', '\n')
+        if proc.returncode == 0:
+            logging.debug("compile: OK: %s", self.test_file)
+            return
+
+        self.remove_template()
+        error_msg = ''
+        hidden = any(test['hidden']
+                     for test in self.question['tests'])
+        copy = False
+        logging.debug("compile question %s hidden: %s", self.test_file, hidden)
+        for line in stderr.splitlines()[:-1]:
+            line = re.sub('^\\s+', '', line)
+            if re.match('^\\s*\\^.*', line):
+                continue
+
+            m = re.match(JUNIT_COMPILER_PATTERN, line)
+            if m:
+                if m.group(1).endswith(self.template_file) and not hidden:
+                    linenr = int(m.group(2)) - self.question['template_offs']
+                    error_msg += 'line {}: {}: {}\n\n'.format(linenr, m.group(3), m.group(4))
+                    copy = True
+                else:
+                    xfn = m.group(1).replace("inginious/", "")
+                    error_msg = "compile error: hidden test (internal code: {}:{})".format(xfn, m.group(2))
+                    logging.debug("compile error: hidden test: %s", line)
+                    copy = False
+            else:
+                if copy:
+                    error_msg += line + '\n\n'
+
+            logging.error("compile failed: " + self.test_file + " : " + error_msg)
+
+        if error_msg:
+            raise Exception('**Compile Error:** ' + self.test_file + '\n\n' + error_msg)
+
+    def run_tests(self):
+        try:
+            cmd = RUN_STUDENT + [
+                'java',
+                '-jar', JUNIT_PATH,
+                '-cp', '.:{}'.format(self.out_dir),
+                '--details=summary',
+                '--reports-dir={}'.format(self.report_dir),
+                '--scan-class-path',
+            ]
+            logging.debug("run tests: %s", " ".join(cmd))
+            proc = subprocess.run(cmd, timeout=THREAD_TIMEOUT, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+            stderr = proc.stderr.decode('utf-8').replace('\r\n', '\n')
+            if stderr:  # pragma: no cover
+                logging.info("test run stderr: %s", stderr)
+            if proc.returncode != 0:
+                logging.debug("test run failed: %s", self.test_file)
+                # self.fail("failed to run tests: " + str(proc.returncode))
+                self.fail("")
+
+        except subprocess.TimeoutExpired:
+            logging.error("Timeout: java run: %s", self.test_file)
+            raise Exception('**Timeout!**\n\nInfinite loop?')
+
+    def grade_tests(self):
+        try:
+            report = parse_junit_report(self.report_dir + '/TEST-junit-jupiter.xml')
+        except Exception as e:  # pragma: no cover
+            logging.error("error parse_junit_report(): %s" % str(e))
+            raise ValueError("error parsing junit results") from e
+
+        fb: Feedback = self.question["feedback"]
+        for check in self.checks:
+            if check.get("result", False):
+                fb.test_passed(check['weight'])
+            else:
+                fb.test_failed(check['weight'], "")
+
+        for test in self.tests:
+            name = test['name'][:-2]
+            test_case = report[name]
+            logging.info("test case %s success: %s pts: %s",
+                         test['name'],
+                         not test_case['failed'],
+                         test['weight'])
+            if not test_case['failed']:
+                fb.test_passed(test['weight'])
+                test["feedback"] = "passed"
+            else:
+                if test['hidden']:
+                    msg = '\n\nTest {name} failed'.format(name=name)
+                else:
+                    msg: str = test_case['message']
+                    if test['nodetails']:
+                        try:
+                            msg = '\nFAIL: ' + msg[:msg.index(" ==>") + 1]
+                        except ValueError:  # pragma: no cover
+                            msg = '**{name}**:\n\n    {msg}\n\n'.format(name=name, msg=msg)
+                    else:
+                        msg = msg.replace("'getStdOut() ==>", "System.print(): ")
+                        msg = '**{name}**:\n{msg}\n\n'.format(name=name, msg=msg)
+
+                fb.test_failed(test['weight'], msg + "\n")
+                test["feedback"] = "failed"
+                test["feedback_msg"] = msg
+
+        logging.debug("Graded test %s: pass %s fail %s  pts: %s/%s",
+                      self.id,
+                      fb.passed_test_num,
+                      fb.failed_test_num,
+                      fb.pts_earned,
+                      fb.pts_total
+                      )
+
+    def fail(self, msg):
+        logging.info("FAIL: %s: %s", self.test_file, msg)
+        self.question["feedback"].fail(msg)
+
+    # def succeed(self, msg):
+    #    logging.info("OK: %s: %s", self.test_file, msg)
+    #    self.question["feedback"].succeed()
+
+
+def run_checkstyle(pts=0.1):
+    if pts <= 0:
+        return
+    logging.info("run_checkstyle")
+    filenames = list(CHECKSTYLE_FILES)
+    if not filenames:
+        return
+    try:
+        xmlresultfilename = "reports/checkstyle-results.xml"
+        # @TODO:  -d
+        cmd = CHECKSTYLECMD + ['-c', 'checkstyle.xml',
+                               '-f', 'xml', '-o=' + xmlresultfilename] + filenames
+        logging.debug("checkstyle: %s", " ".join(cmd))
+        proc = subprocess.run(cmd, timeout=THREAD_TIMEOUT, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        if proc.returncode != 0:  # pragma: no cover
+            logging.info("checkstyle returncode: %d", proc.returncode)
+
+        stderr = proc.stderr.decode('utf-8').replace('\r\n', '\n')
+        if stderr:  # pragma: no cover
+            logging.info("chechkstyle error: %s", stderr)
+            QUESTIONS[0]['feedback'].csfail(99 * pts, "failed to run checkstyle")
+            return
+
+        # stdout = proc.stdout.decode('utf-8').replace('\r\n', '\n')
+
+        # cs_problem = re.compile(r"^\[([A-Z]+)\] .*/(Template_)?(.*)\.java:(\d+):(.*)$")
+        offsets = {question['template']: question['template_offs']
+                   for question in QUESTIONS}
+        feedback4file = {question['template']: question['feedback']
+                         for question in QUESTIONS}
+
+        total = 0
+        tree = xml.dom.minidom.parse(xmlresultfilename)
+        for entry in tree.getElementsByTagName("checkstyle"):
+            for onefile in entry.getElementsByTagName("file"):
+                ffn = Path(onefile.getAttribute("name"))  # full filename
+                fn = ffn.name
+                sfn = ffn.name[:-5].replace("Template_", "")  # without Template_, .java
+                fb = feedback4file[fn]
+                logging.error("Checkstyle file: %s" % fn)
+                for err in onefile.getElementsByTagName("error"):
+                    lnr = int(err.getAttribute("line"))
+                    column = int(err.getAttribute("column"))
+                    message = err.getAttribute("message")  # text
+                    typ = err.getAttribute("severity").capitalize()  # warning, ...
+                    source = err.getAttribute("source")  # checkstyle internal name
+                    src = source.split(".")[-1]
+                    logging.info("Checkstyle: %s" % str((lnr, column, typ, src)))
+
+                    with open(ffn) as f:
+                        data = f.readlines()[lnr - 1]
+                    lnr -= int(offsets[fn]) - 1  # compensate template code
+                    if lnr > 0: # sometimes the last line of the template code is flagged as bad
+                        col = " " * (column - 1) + "^\n"
+                        fb.csfail(pts, data + col + ":".join((typ, sfn, str(lnr), src, message)) + "\n\n")
+                        total += 1
+
+        logging.info("checkstyle -%s %% * %s", pts, total)
+
+    except subprocess.TimeoutExpired as e:  # pragma: no cover
+        logging.error("checkstyle timeout")
+        QUESTIONS[0]['feedback'].csfail(99 * pts, "failed to run checkstyle - timeout")
+        raise Exception('**Checkstyle timeout!**\n\nInfinite loop?') from e
+
+
+def show_feedback():
+    points = 0
+    max_points = 0
+    success = True
+
+    for question in QUESTIONS:
+        if question['create']:
+            questionid = question['id']
+            fb = question['feedback']
+            pts = max(0, question['weight'] * fb.pts_earned / fb.pts_total)
+            points += pts
+            max_points += question['weight']
+
+            logging.info("Feedback {id}: pts {e:.2f}/{t:.2f} => {pts:.2f} num: {p}/{f}".format(
+                id=questionid,
+                e=fb.pts_earned, t=fb.pts_total, pts=points,
+                p=fb.passed_test_num, f=fb.failed_test_num))
+            if not fb.success or fb.pts_earned < 0.99 * fb.pts_total:
+                success = False
+                logging.info("Feedback: success = False")
+
+            num = fb.passed_test_num + fb.failed_test_num
+            if num:
+                msg = '\n\n{passed} of {num} tests passed successfully\n\n'.format(
+                    passed=fb.passed_test_num,
+                    num=num)
+            else:
+                msg = "\n\n"
+            if fb.messages:
+                msg += "\n".join(fb.messages[0:MAXERRORS])
+                msg = msg.replace("\n" * 3, "\n" * 2)
+                msg = "\n.. code:: java\n" + "\n    ".join(x for x in msg.splitlines())
+                feedback.set_problem_result('failed', questionid)
+                feedback.set_problem_feedback(msg, questionid)
+                question["problem_result"] = 'failed'
+                question["problem_feedback"] = msg
+            else:
+                if fb.pts_earned == fb.pts_total:
+                    msg = '**Everything looks ok!**' + msg
+                    feedback.set_problem_result('success', questionid)
+                    feedback.set_problem_feedback(msg, questionid)
+                    question["problem_result"] = 'success'
+                    question["problem_feedback"] = msg
+                else:
+                    feedback.set_problem_result('failed', questionid)
+                    feedback.set_problem_feedback(msg, questionid)
+                    question["problem_result"] = 'failed'
+                    question["problem_feedback"] = msg
+
+    if points <= 0 or max_points <= 0:
+        feedback.set_grade(0)
+    else:
+        logging.info("Feedback total : pts {p:.2f}/{t:.2f}".format(p=points, t=max_points))
+        feedback.set_grade(points / max_points * 100)
+
+    if success:
+        logging.info("success")
+        feedback.set_global_result('success')
+        feedback.set_global_feedback('All submitted tasks passed tests successfully!')
+    else:
+        logging.info("failed")
+        feedback.set_global_result('failed')
+        feedback.set_global_feedback('Have another look on your submissions')
+
+    logging.debug("write feedback")
+    with open("../feedback", "w") as f:
+        print("{", file=f)
+        print(f"  'question' : {pprint.pformat(QUESTIONS)},", file=f)
+        print(f"  'points' : {points},", file=f)
+        print(f"  'max_points' : {max_points},", file=f)
+        print("}", file=f)
+
+
+def run_question(q):
+    test = TestThread(q)
+    try:
+        test.run()
+    except Exception as e:  # pragma: no cover
+        msg = "Failed to run test {id}: {e}".format(id=test.id, e=e)
+        logging.error(msg, exc_info=True, stack_info=True)
+        test.fail(msg)
+
+    return test
+
+
+def main():
+    try:
+        mkdir("student")
+        os.chdir("student")
+        mkdir(OUT_DIR)
+        mkdir(REPORT_DIR)
+
+        try:
+            for fn in os.listdir("resources"):
+                if fn not in [".", ".."]:
+                    os.chmod("resources/" + fn, stat.S_IREAD)
+        except FileNotFoundError:
+            pass
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            futures = {executor.submit(run_question, question)
+                       for question in QUESTIONS
+                       }
+
+        logging.info("Started threads")
+        for future in concurrent.futures.as_completed(futures):
+            test = future.result()
+            logging.info("Thread joined: %s", test.id)
+
+        run_checkstyle(RUN_CSPTS)
+
+        show_feedback()
+
+    except Exception as e:  # pragma: no cover
+        logging.error("OOPS %s", str(e), exc_info=True, stack_info=True)
+        raise
+
+
+if len(sys.argv) > 1:
+    logging.basicConfig(level=logging.DEBUG)
+else:  # pragma: no cover
+    logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s',
+                        datefmt='%m-%d %H:%M',
+                        filename='run.log',
+                        filemode='w')
+
+main()

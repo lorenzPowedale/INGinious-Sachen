@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+<head>
+ <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<meta name="generator" content="Docutils 0.16: http://docutils.sourceforge.net/" />
+<title>Check</title>
+
+
+<h1> Task A </h1>
+
+<blockquote>
+<p>Teste jede der folgenden Methoden, indem du sie mit verschiedenen Parametern (auch Sonderfälle wie leere Texte,
+negative Werte etc.) aufrufst und die Ergebnisse ausgibst. (z.B. mit <tt class="docutils literal"><span class="pre">System.out.println(...)</span></tt>).
+Ein kurze „Erklärung“ bei der Ausgabe ist auch gewünscht.</p>
+<p>Kopiere dann deine Lösung hierher.</p>
+<p><strong>Achtung</strong>: manchmal werden andere Methoden (=fertige Lösung für ein anderes Beispiel zur Verfügung gestellt). Diese kannst
+du dann verwenden.
+Falls du eine andere (=nicht gegebene) deiner eigenen Methoden aufrufen willst musst du sie auch zur entsprechenden Abgabe
+kopieren.</p>
+</blockquote>
+
+
+<h2> Question Repeat </h2>
+
+<blockquote>
+<p>Schreibe die Methode:</p>
+<pre class="code java literal-block">
+public static String repeat(String text, int count)
+</pre>
+<p>Die Methode soll den Text <tt class="docutils literal">text</tt> <tt class="docutils literal">count</tt>-mal hintereinander hängen.</p>
+<ul class="simple">
+<li>Die Methode soll einen Leerstring liefern, wenn <tt class="docutils literal">count ≤ 0</tt> ist.</li>
+<li>Beispiel: <tt class="docutils literal"><span class="pre">System.out.println(repeat(&quot;ab&quot;,</span> <span class="pre">3));</span> // Ausgabe: ababab</tt></li>
+</ul>
+</blockquote>
+
+
+<h2> Question Reverse </h2>
+
+<blockquote>
+<p>Schreibe die Methode:</p>
+<pre class="code java literal-block">
+public static String reverse (String s)
+</pre>
+<p>Die Methode soll den String <tt class="docutils literal">s</tt> umdrehen.</p>
+<ul class="simple">
+<li>Beispiel: <tt class="docutils literal"><span class="pre">System.out.println(reverse(&quot;abc&quot;));</span> // Ausgabe: cba</tt></li>
+</ul>
+</blockquote>
+
+
+<h2> Question RemoveNonLetters </h2>
+
+<blockquote>
+<p>Schreibe die Methode:</p>
+<pre class="code java literal-block">
+public static String removeNonLetters(String s)
+</pre>
+<p>Die Methode soll alle Zeichen aus dem String <tt class="docutils literal">s</tt> herauslöschrn, die keine Buchstaben sind.</p>
+<ul class="simple">
+<li>Tipp: Mittels der Methode <tt class="docutils literal">Character.isLetter(char ch)</tt> kann überprüft werden, ob das Zeichen <tt class="docutils literal">ch</tt> ein Letter ist.</li>
+<li>Beispiele:<ul>
+<li><tt class="docutils literal"><span class="pre">Character.isLetter('ü')</span> → true</tt></li>
+<li><tt class="docutils literal"><span class="pre">Character.isLetter('+')</span> → false</tt></li>
+</ul>
+</li>
+</ul>
+</blockquote>
+
+
+<h2> Question isWordPalindrom </h2>
+
+<blockquote>
+<p>Schreibe die Methode:</p>
+<pre class="code java literal-block">
+public static boolean isWordPalindrom(String word)
+</pre>
+<p>Die Methode testet, ob <tt class="docutils literal">word</tt> ein Wortpalindrom ist.</p>
+<ul class="simple">
+<li>Ein Wortpalindrom ist ein Wort, das rückwärts und vorwärts gelesen das selbe Wort ergibt.</li>
+<li>Die Groß-/Kleinschreibung ist dabei irrelevant.</li>
+<li>Beispiele:<ul>
+<li><tt class="docutils literal"><span class="pre">isWordPalindrom(&quot;Lagerregal&quot;)</span> → true</tt></li>
+<li><tt class="docutils literal"><span class="pre">isWordPalindrom(&quot;hugo&quot;)</span> → false</tt></li>
+</ul>
+</li>
+</ul>
+<p>Die Methode <tt class="docutils literal">reverse(String)</tt> wird dir zur Verfügung gestellt.</p>
+</blockquote>
+
+
+<h2> Question IsPalindrom </h2>
+
+<blockquote>
+<p>Schreibe die Methode:</p>
+<pre class="code java literal-block">
+public static boolean isPalindrom(String s)
+</pre>
+<p>Die Methode testet, ob <tt class="docutils literal">s</tt> ein Satzpalindrom ist.</p>
+<ul class="simple">
+<li>Erweitere dazu die Methode isWordPalindrom.</li>
+<li>Ignoriere alle Zeichen, die keine Letters sind. (Tipp: <strong>removeNonLetters</strong>)</li>
+<li>Beispiel: <tt class="docutils literal"><span class="pre">isPalindrom(&quot;Die</span> Liebe ist Sieger; stets rege ist sie bei <span class="pre">Leid.&quot;)</span> → true</tt></li>
+</ul>
+<p>Die Methoden <tt class="docutils literal">reverse(String)</tt>, <tt class="docutils literal">isWordPalindrom(String)</tt> und <tt class="docutils literal">removeNonLetters(String)</tt> werden dir zur Verfügung gestellt.</p>
+</blockquote>
+
+
+<h2> Question getRandomPassword </h2>
+
+<blockquote>
+<p>Schreibe die Methode:</p>
+<pre class="code java literal-block">
+public static String getRandomPassword(int length)
+</pre>
+<p>Die Methode soll ein „starkes“ Passwort mit Zufallszeichen erzeugen.</p>
+<ul class="simple">
+<li>Das Passwort soll <tt class="docutils literal">length</tt> Zeichen haben.</li>
+<li>Es soll aus den Zeichen <cite>&quot;a-zA-Z0-9&quot;</cite> bestehen.</li>
+<li>Jedoch ohne dem kleinen <cite>'L'</cite> bzw. dem großen <cite>'O'</cite>, da diese Zeichen schlecht von 1 bzw 0 unterschieden werden können.</li>
+<li>Tipp: Ein (langes) Passwort mit Zufallszeichen ist ziemlich unknackbar.</li>
+</ul>
+</blockquote>
+
