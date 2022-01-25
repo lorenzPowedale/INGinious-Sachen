@@ -224,7 +224,7 @@ QUESTIONS = [{'checks': [],
              'weight': 1.0}],
   'weight': 1.0}]
 
-JUNIT_PATH = '/usr/share/junit-platform-console-standalone-1.7.0.jar'
+JUNIT_PATH = '/usr/share/junit-platform-console-standalone-1.6.2.jar'
 CHECKSTYLE_PATH = '/usr/bin/checkstyle-all.jar'
 THREAD_TIMEOUT = 10
 RUN_CSPTS = False
